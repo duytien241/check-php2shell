@@ -36,6 +36,8 @@ Two memory-safety bugs in PHP core, fixed on 2026-10-21. Both are reachable by a
 ./check-php2shell.sh classify "$(php-fpm -v)"   # or the full -v banner
 ./check-php2shell.sh crictl [FILTER]            # on a node: every container with PHP
 ./check-php2shell.sh audit [HOURS]              # indicator sweep, default 48 hours
+./check-php2shell.sh audit 48 --log-dir /app/logs   # also read a custom log directory
+PHP2SHELL_LOG_PATHS=/a/logs:/b/logs ./check-php2shell.sh audit   # same, colon-separated
 ./check-php2shell.sh url https://example.com/   # passive X-Powered-By check
 ./check-php2shell.sh -h
 ```
@@ -45,7 +47,7 @@ Exit codes:
 | Mode | `0` | `1` | `2` |
 |---|---|---|---|
 | `crictl` | every container with PHP is `PATCHED` | at least one is `VULNERABLE` or `UNKNOWN`, or `crictl` is missing / `crictl ps` failed | — |
-| `audit` | every check is `PASS` | at least one `REVIEW` | invalid `HOURS` |
+| `audit` | every check is `PASS` | at least one `REVIEW` | invalid `HOURS` or `--log-dir` without a path |
 | `url` | version found (read the status) | version not disclosed | missing URL |
 | `classify` | always (read the status) | — | — |
 
@@ -96,14 +98,24 @@ A pool `php_admin_value[memory_limit]` overrides php.ini, so a container with `m
 
 ### `audit`
 
-Seven read-only checks on the host. Container files are read through the overlay `upperdir` of each running container and container logs through `/var/log/pods`, so nothing is exec'd into containers. Host nginx / apache / httpd / PHP-FPM logs under `/var/log` are read too, for PHP running outside Kubernetes; custom log paths elsewhere are not.
+Seven read-only checks on the host. Container files are read through the overlay `upperdir` of each running container and container logs through `/var/log/pods`, so nothing is exec'd into containers.
+
+Log sources for check 4, printed under **Log coverage** after the check (only what is listed was read):
+
+- `/var/log/pods`, `/var/log/nginx`, `/var/log/apache2`, `/var/log/httpd`, `/var/log/php*` (files named `*log*`). `/var/log/containers` is skipped: it only holds symlinks into `/var/log/pods`.
+- Absolute log paths set in nginx (`access_log`, `error_log`), apache (`CustomLog`, `ErrorLog`, `TransferLog`) and PHP / PHP-FPM config (`error_log`, `slowlog`, `access.log`) under `/etc` and `/usr/local/etc`, plus their rotations. The config is read with `grep`, not `nginx -T`, which can create log files. Paths built from variables such as `${APACHE_LOG_DIR}` are not resolved.
+- Every file under `--log-dir` and `PHP2SHELL_LOG_PATHS`. A given path that does not exist or is not readable is reported as `REVIEW`, never `PASS`.
+- Rotated files, `.gz` included (read with `zgrep`). The window is the file mtime, which gzip keeps from the original log.
+- journald: `nginx*`, `apache2*`, `httpd*` and `php*fpm*` units, and the kernel log, both since the start of the window.
+
+If no log source exists at all, check 4 is `REVIEW` with `NO LOG SOURCE FOUND`. Access log status codes (502/503/504) and `multipart/form-data` are not matched: they appear in normal traffic and would make every run `REVIEW`.
 
 | # | Check | Based on |
 |---|---|---|
 | 1 | A shell, downloader or compiler whose parent or grandparent is php-fpm / php-cgi / apache / httpd / nginx | WoYinDao Sigma process rule |
 | 2 | PHP, `.user.ini`, `.htaccess` and PHP ini files changed in the window (ctime, which `touch` cannot fake). Laravel's `storage/framework` and `bootstrap/cache` are skipped | |
 | 3 | Webshell-like calls in those PHP files; `auto_prepend_file` / `auto_append_file` set to a value in any `.ini`, `.user.ini`, `.conf` or `.htaccess` (any age, not only the window) | imsarah hardening guide |
-| 4 | Logs changed in the window (`/var/log/pods`, `/var/log/nginx`, `/var/log/apache2`, `/var/log/httpd`, `/var/log/php*`, including uncompressed rotated files) and the kernel log: `Allowed memory size … in Unknown on line 0`, `exited on signal 6/7/11`, `SIGSEGV`/`SIGBUS`, PHP segfaults, `Input variables exceeded`, illegal session id warnings, `PHP_SESSION_UPLOAD_PROGRESS`, `upstream prematurely closed connection` | WoYinDao Sigma, php2shell-detect |
+| 4 | Logs changed in the window (sources above), journald units and the kernel log: `Allowed memory size … in Unknown on line 0`, `exited on signal 6/7/11`, `SIGSEGV`/`SIGBUS`, PHP segfaults, `Input variables exceeded`, illegal session id warnings, `PHP_SESSION_UPLOAD_PROGRESS`, `upstream prematurely closed connection` | WoYinDao Sigma, php2shell-detect |
 | 5 | Cron files changed in the window | |
 | 6 | Session files containing `upload_progress_` data | |
 | 7 | PHP processes running a binary that has been deleted or replaced (upgraded but not restarted) | m16a4666/php2shell-fix |
@@ -133,7 +145,7 @@ aws ssm get-command-invocation --command-id "$CID" --instance-id "$NODE" \
   --query '[Status,StandardOutputContent,StandardErrorContent]' --output text
 ```
 
-The heaviest step is reading `/var/log/pods`, host web server logs and the kernel journal; expect a short CPU and disk spike on small nodes.
+The heaviest step is reading `/var/log/pods`, host web server logs (including `.gz` rotations) and the journal; expect a short CPU and disk spike on small nodes.
 
 ## Mitigations (from the php.net announcement)
 
@@ -185,7 +197,7 @@ Tested in Docker against Ubuntu 24.04 PHP-FPM 8.3, Ubuntu 24.04 Apache + mod_php
 
 - **Distro backports.** Debian, Ubuntu, Alpine and other vendors may ship a fixed build under an older version number. The script recognises the Ubuntu packages listed in USN-8948-1; Debian 12/13 bumped the number (`8.2.35-1~deb12u1`, `8.4.27-1~deb13u1`). For anything else, including deb.sury.org packages, check the vendor changelog against the printed package version.
 - **`php-fpm -i` reads the config on disk**, not the running workers. After changing ini files or a ConfigMap, restart the pods before trusting the result.
-- **The audit is a heuristic.** Logs only cover what is still on the node; an attacker can remove files; a clean result is not proof.
+- **The audit is a heuristic.** Logs only cover what is still on the node and listed under Log coverage; an attacker can remove files; a clean result is not proof.
 
 ## Testing
 

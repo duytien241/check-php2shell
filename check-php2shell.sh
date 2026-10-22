@@ -33,7 +33,9 @@
 #   check-php2shell.sh crictl [FILTER]          # run ON A NODE: scan every container
 #                                               # with PHP; FILTER matches image,
 #                                               # pod, container or namespace
-#   check-php2shell.sh audit [HOURS]            # read-only indicator sweep
+#   check-php2shell.sh audit [HOURS] [--log-dir DIR]...
+#                                               # read-only indicator sweep; extra log
+#                                               # paths also via PHP2SHELL_LOG_PATHS=a:b
 #   check-php2shell.sh url https://host/        # read X-Powered-By (one HEAD request)
 #   check-php2shell.sh -h
 #
@@ -294,7 +296,15 @@ proc_tree_scan() {
 # container files are read through the overlay upperdir, container logs via /var/log/pods,
 # and host web server / PHP-FPM logs from their usual paths under /var/log.
 audit_scan() {
-	local hours="${1:-48}" minutes since roots uppers out review=0 p e
+	local hours=48 minutes since roots uppers out review=0 p e lp n cov="" log_re
+	local log_targets=() user_logs=() log_files=()
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--log-dir) [ -n "${2:-}" ] || { echo "--log-dir needs a path" >&2; return 2; }
+			           user_logs+=("$2"); shift 2 ;;
+			*)         hours="$1"; shift ;;
+		esac
+	done
 	case "$hours" in
 		''|*[!0-9]*) echo "audit HOURS must be a positive integer" >&2; return 2 ;;
 	esac
@@ -350,22 +360,63 @@ audit_scan() {
 		} | head -200 || true)
 	report 3 'Webshell-like code in recently changed PHP files; auto_prepend_file/auto_append_file in ini files' "$out"
 
-	# Container logs (php-fpm writes to stdout), host nginx/apache/PHP-FPM logs (PHP outside
-	# Kubernetes) and the kernel log. Patterns from the WoYinDao Sigma rules, php2shell-detect,
-	# and how FPM reports a dead worker. Custom log paths outside /var/log are not covered.
-	out=$( {
-		find /var/log/pods /var/log/nginx /var/log/apache2 /var/log/httpd /var/log/php* \
-			-type f \( -name '*.log' -o -name '*.log.[0-9]*' -o -name '*_log' -o -name '*_log-*' \) -not -name '*.gz' \
-			-mmin "-${minutes}" -print0 2>/dev/null \
-			| xargs -0 -r grep -HiE 'Allowed memory size of [0-9]+ bytes exhausted.*Unknown on line 0|exited on signal (6|7|11)|SIGSEGV|SIGBUS|Input variables exceeded|session id is too long or contains illegal characters|PHP_SESSION_UPLOAD_PROGRESS|upstream prematurely closed connection' 2>/dev/null \
-			| tail -150
+	# Log files: container logs (php-fpm writes to stdout), host nginx/apache/PHP-FPM logs,
+	# log paths set in their config (read with grep, not `nginx -T`, which can create log files),
+	# then PHP2SHELL_LOG_PATHS (colon-separated) and --log-dir, which must be readable.
+	# Rotated and .gz files are included; -mmin still bounds the window (gzip keeps the mtime).
+	# Patterns from the WoYinDao Sigma rules, php2shell-detect, and how FPM reports a dead worker.
+	log_re='Allowed memory size of [0-9]+ bytes exhausted.*Unknown on line 0|exited on signal (6|7|11)|SIGSEGV|SIGBUS|Input variables exceeded|session id is too long or contains illegal characters|PHP_SESSION_UPLOAD_PROGRESS|upstream prematurely closed connection'
+	log_targets=(/var/log/pods /var/log/nginx /var/log/apache2 /var/log/httpd)
+	for lp in /var/log/php*; do [ -e "$lp" ] && log_targets+=("$lp"); done
+	while IFS= read -r lp; do
+		for p in "$lp"*; do [ -e "$p" ] && log_targets+=("$p"); done   # the file and its rotations
+	done < <(grep -rhsiE '^[[:space:]]*(access_log|error_log|CustomLog|ErrorLog|TransferLog|slowlog|access\.log)[[:space:]=]+"?/' \
+			/etc/nginx /etc/apache2 /etc/httpd /etc/php* /etc/php-fpm* /usr/local/etc/php* 2>/dev/null \
+		| sed -E 's#^[^/]*##; s#["; ].*$##' | sort -u || true)
+	IFS=: read -ra p <<<"${PHP2SHELL_LOG_PATHS:-}"
+	user_logs=(${p[@]+"${p[@]}"} ${user_logs[@]+"${user_logs[@]}"})
+
+	# Default and configured paths: files named *log*. Paths the user gave: every file.
+	for lp in "${log_targets[@]}" ${user_logs[@]+"${user_logs[@]}"}; do
+		[ -n "$lp" ] && [ -e "$lp" ] || continue
+		e='*log*'
+		for p in ${user_logs[@]+"${user_logs[@]}"}; do [ "$p" != "$lp" ] || e='*'; done
+		n=0
+		while IFS= read -r -d '' p; do log_files+=("$p"); n=$((n + 1)); done \
+			< <(find "$lp" -type f -name "$e" -mmin "-${minutes}" -print0 2>/dev/null || true)
+		cov+="        $lp: $n file(s) changed in the window"$'\n'
+	done
+	out=""
+	[ -n "$cov" ] || out+="NO LOG SOURCE FOUND: none of the default, configured or given log paths exist; pass --log-dir"$'\n'
+	for lp in ${user_logs[@]+"${user_logs[@]}"}; do
+		[ -n "$lp" ] || continue
+		if [ ! -e "$lp" ]; then out+="NOT FOUND: $lp (given in PHP2SHELL_LOG_PATHS / --log-dir)"$'\n'
+		elif [ ! -r "$lp" ] || { [ -d "$lp" ] && [ ! -x "$lp" ]; }; then out+="NOT READABLE: $lp"$'\n'
+		fi
+	done
+
+	out+=$( {
+		if [ "${#log_files[@]}" -gt 0 ]; then
+			printf '%s\0' "${log_files[@]}" | sort -zu \
+				| if command -v zgrep >/dev/null 2>&1; then xargs -0 -r zgrep -HiE -e "$log_re"; else xargs -0 -r grep -HiE -e "$log_re"; fi 2>/dev/null \
+				| tail -150
+		fi
 		if command -v journalctl >/dev/null 2>&1; then
+			journalctl --since "$since" --no-pager -q -u 'nginx*' -u 'apache2*' -u 'httpd*' -u 'php*fpm*' 2>/dev/null \
+				| grep -iE -e "$log_re" | tail -100
 			journalctl -k --since "$since" --no-pager -q 2>/dev/null | grep -iE 'php.*(segfault|general protection|trap)' | tail -50
 		else
 			dmesg 2>/dev/null | grep -iE 'php.*(segfault|general protection|trap)' | tail -50
 		fi
 		} || true)
-	report 4 'Pod, web server, PHP-FPM and kernel logs: out of memory while parsing the request ("Unknown on line 0"), crashed FPM workers, unusual session/input warnings' "$out"
+	out=${out%$'\n'}
+	report 4 'Pod, web server, PHP-FPM, journald and kernel logs: out of memory while parsing the request ("Unknown on line 0"), crashed FPM workers, unusual session/input warnings' "$out"
+	printf '      Log coverage (only what is listed was read):\n%s' "${cov:-        no log file or directory found$'\n'}"
+	if command -v journalctl >/dev/null 2>&1; then
+		printf '        journald: nginx*/apache2*/httpd*/php*fpm* units and kernel, since %s\n\n' "$since"
+	else
+		printf '        journald: not available, kernel log from dmesg\n\n'
+	fi
 
 	out=$(find /etc/cron* /var/spool/cron $(for p in $uppers; do printf '%s/etc/cron.d %s/var/spool/cron ' "$p" "$p"; done) \
 		-type f -cmin "-${minutes}" -ls 2>/dev/null | head -100 || true)
@@ -402,7 +453,7 @@ url_check() {
 case "${1:-}" in
 	classify) shift; classify "$@" ;;
 	crictl)   shift; crictl_scan "${1:-}" ;;
-	audit)    shift; audit_scan "${1:-48}" ;;
+	audit)    shift; audit_scan "$@" ;;
 	url)      shift; url_check "${1:-}" ;;
 	-h|--help|"")
 		sed -n '2,/^set -euo/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'
