@@ -33,7 +33,7 @@
 #   check-php2shell.sh crictl [FILTER]          # run ON A NODE: scan every container
 #                                               # with PHP; FILTER matches image,
 #                                               # pod, container or namespace
-#   check-php2shell.sh audit [HOURS] [--log-dir DIR]...
+#   check-php2shell.sh audit [HOURS] [--log-dir DIR]... # HOURS default 168 (7 days)
 #                                               # read-only indicator sweep; extra log
 #                                               # paths also via PHP2SHELL_LOG_PATHS=a:b
 #   check-php2shell.sh url https://host/        # read X-Powered-By (one HEAD request)
@@ -296,7 +296,7 @@ proc_tree_scan() {
 # container files are read through the overlay upperdir, container logs via /var/log/pods,
 # and host web server / PHP-FPM logs from their usual paths under /var/log.
 audit_scan() {
-	local hours=48 minutes since roots uppers out review=0 p e lp n cov="" log_re
+	local hours=168 minutes since roots uppers out review=0 p e lp n cov="" log_re
 	local log_targets=() user_logs=() log_files=()
 	while [ $# -gt 0 ]; do
 		case "$1" in

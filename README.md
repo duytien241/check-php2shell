@@ -35,8 +35,8 @@ Two memory-safety bugs in PHP core, fixed on 2026-10-21. Both are reachable by a
 ./check-php2shell.sh classify 8.3.35            # one version string
 ./check-php2shell.sh classify "$(php-fpm -v)"   # or the full -v banner
 ./check-php2shell.sh crictl [FILTER]            # on a node: every container with PHP
-./check-php2shell.sh audit [HOURS]              # indicator sweep, default 48 hours
-./check-php2shell.sh audit 48 --log-dir /app/logs   # also read a custom log directory
+./check-php2shell.sh audit [HOURS]              # indicator sweep, default 168 hours (7 days)
+./check-php2shell.sh audit 72 --log-dir /app/logs   # also read a custom log directory
 PHP2SHELL_LOG_PATHS=/a/logs:/b/logs ./check-php2shell.sh audit   # same, colon-separated
 ./check-php2shell.sh url https://example.com/   # passive X-Powered-By check
 ./check-php2shell.sh -h
@@ -136,7 +136,7 @@ B64=$(base64 < check-php2shell.sh | tr -d '\n')
 PARAMS=$(jq -nc --arg b "$B64" '{commands:[
   "export LANG=C.UTF-8",
   ("echo \($b) | base64 -d | bash -s -- crictl; echo \"[crictl exit=$?]\""),
-  ("echo \($b) | base64 -d | bash -s -- audit 48; echo \"[audit exit=$?]\"")
+  ("echo \($b) | base64 -d | bash -s -- audit; echo \"[audit exit=$?]\"")
 ], executionTimeout:["300"]}')
 CID=$(aws ssm send-command --document-name AWS-RunShellScript --instance-ids "$NODE" \
   --parameters "$PARAMS" --query Command.CommandId --output text)
