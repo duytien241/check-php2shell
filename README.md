@@ -4,6 +4,8 @@ A single Bash script to find PHP exposed to **PHP2Shell** (CVE-2026-109618 / CVE
 
 It was written for PHP-FPM running in Kubernetes pods, scanned from the node with `crictl`. The `classify`, `audit` and `url` modes also work on an ordinary Linux server.
 
+A second script, [`mitigate-php2shell.sh`](#temporary-mitigation-mitigate-php2shellsh), applies the interim mitigations on a server (PHP-FPM or Apache mod_php) until PHP is upgraded.
+
 ## What PHP2Shell is
 
 Two memory-safety bugs in PHP core, fixed on 2026-10-21. Both are reachable by an unauthenticated remote attacker.
@@ -142,6 +144,42 @@ Only an update is a complete fix. These reduce exposure:
 - `post_max_size = 8M` without uploads, `32M` with uploads; keep `upload_max_filesize` below it. Limit body size, field count and multipart parts at the proxy too.
 - PHP 8.5 only: `fatal_error_backtraces=0`.
 - Restart every worker afterwards.
+
+## Temporary mitigation: `mitigate-php2shell.sh`
+
+Applies the mitigations above on a server, at a level applications cannot override, and nothing else. It does not upgrade PHP, and it is not a fix.
+
+| Setting | Value | Against |
+|---|---|---|
+| `session.upload_progress.enabled` | `off` | CVE-2026-109619 |
+| `memory_limit` | `-1` | CVE-2026-109618 |
+| `post_max_size` | `8M` (`--post-max 32M` if the app accepts uploads) | CVE-2026-109618 |
+| `upload_max_filesize` | 3/4 of `post_max_size` (`--upload-max`) | |
+| `fatal_error_backtraces` | `off`, PHP 8.5 only | CVE-2026-109619 |
+| `pm.max_requests` (FPM) | `500` (`--max-requests`), never raised above a lower value the pool already has | |
+| systemd `MemoryMax` + `OOMPolicy=continue` | only with `--memory-max 70%` (or `2G`) | needed because `memory_limit = -1` |
+
+Supported layouts: Debian/Ubuntu `/etc/php/<ver>/fpm/pool.d` (including deb.sury.org), RHEL/Alma/Rocky/Amazon Linux `/etc/php-fpm.d`, Remi `/etc/opt/remi/php*/php-fpm.d`, and Apache with mod_php (`/etc/apache2/conf-available` or `/etc/httpd/conf.d`). Anything else: `--pool-dir DIR --fpm-bin BIN --service NAME`. Inside a container it changes nothing and prints the ini to bake into the image.
+
+```bash
+sudo ./mitigate-php2shell.sh plan                          # default: show the change, change nothing
+sudo ./mitigate-php2shell.sh apply                         # write, config-test, print the restart command
+sudo ./mitigate-php2shell.sh apply --memory-max 70% --restart
+sudo ./mitigate-php2shell.sh verify                        # conflicts left? restarted since? MemoryMax?
+sudo ./mitigate-php2shell.sh rollback --restart            # remove everything it added
+```
+
+How it changes the server:
+
+- It adds one file, `zz-php2shell-mitigation.conf`, next to the existing config (and a systemd drop-in with `--memory-max`). It restarts nothing unless you pass `--restart`.
+- **PHP-FPM keeps the first `php_admin_value` it reads for a setting**, so a later file cannot override a value a pool already sets. Those existing lines are commented out with the marker `;php2shell-disabled; `; `rollback` removes the marker and the original lines come back.
+- The config directory is archived to `/var/backups/php2shell-*.tgz` first; no backup, no change.
+- The service's own config test (`php-fpm -t`, `apachectl configtest`) must pass, otherwise everything is put back. If the script is stopped mid-change (error, Ctrl-C, kill) it undoes that change; after `kill -9` or a power loss, run `rollback`.
+- Apache: a `php_admin_value` in a vhost wins over this server-level file. `plan` lists such lines; change them by hand.
+
+After `apply` and a restart, confirm once with a temporary `phpinfo()` page served by the web server (the Local value column of the web SAPI, not the CLI), then delete that page.
+
+Tested in Docker against Ubuntu 24.04 PHP-FPM 8.3, Ubuntu 24.04 Apache + mod_php 8.3 and Amazon Linux 2023 PHP-FPM 8.5: the values PHP reports through a real FastCGI/HTTP request change after `apply` + restart and return to the originals after `rollback`; a pool that already set `memory_limit = 256M` ends up at `-1`; a pool with a syntax error and a script killed mid-change both leave the files exactly as they were.
 
 ## Caveats
 
