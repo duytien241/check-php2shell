@@ -87,20 +87,21 @@ Mitigation tags:
 | `[OK]` | Set the way the advisory recommends |
 | `[WEAK]` | `memory_limit=-1` comes from php.ini, so an application can still lower it |
 | `[MISSING]` | Not set |
+| `[UNKNOWN]` | Could not be read (`php -i` gave nothing). Not treated as set: `session.upload_progress.enabled` defaults to On |
 | `[LOWER IT]` | `post_max_size` is above 32M or unlimited |
 
 A pool `php_admin_value[memory_limit]` overrides php.ini, so a container with `memory_limit=-1` in php.ini but `256M` in the pool is reported `[MISSING]`.
 
 ### `audit`
 
-Seven read-only checks on the host. Container files are read through the overlay `upperdir` of each running container and container logs through `/var/log/pods`, so nothing is exec'd into containers.
+Seven read-only checks on the host. Container files are read through the overlay `upperdir` of each running container and container logs through `/var/log/pods`, so nothing is exec'd into containers. Host nginx / apache / httpd / PHP-FPM logs under `/var/log` are read too, for PHP running outside Kubernetes; custom log paths elsewhere are not.
 
 | # | Check | Based on |
 |---|---|---|
 | 1 | A shell, downloader or compiler whose parent or grandparent is php-fpm / php-cgi / apache / httpd / nginx | WoYinDao Sigma process rule |
 | 2 | PHP, `.user.ini`, `.htaccess` and PHP ini files changed in the window (ctime, which `touch` cannot fake). Laravel's `storage/framework` and `bootstrap/cache` are skipped | |
 | 3 | Webshell-like calls in those PHP files; `auto_prepend_file` / `auto_append_file` set to a value in any `.ini`, `.user.ini`, `.conf` or `.htaccess` (any age, not only the window) | imsarah hardening guide |
-| 4 | Pod logs changed in the window and the kernel log: `Allowed memory size … in Unknown on line 0`, `exited on signal 6/7/11`, `SIGSEGV`/`SIGBUS`, PHP segfaults, `Input variables exceeded`, illegal session id warnings, `PHP_SESSION_UPLOAD_PROGRESS`, `upstream prematurely closed connection` | WoYinDao Sigma, php2shell-detect |
+| 4 | Logs changed in the window (`/var/log/pods`, `/var/log/nginx`, `/var/log/apache2`, `/var/log/httpd`, `/var/log/php*`, including uncompressed rotated files) and the kernel log: `Allowed memory size … in Unknown on line 0`, `exited on signal 6/7/11`, `SIGSEGV`/`SIGBUS`, PHP segfaults, `Input variables exceeded`, illegal session id warnings, `PHP_SESSION_UPLOAD_PROGRESS`, `upstream prematurely closed connection` | WoYinDao Sigma, php2shell-detect |
 | 5 | Cron files changed in the window | |
 | 6 | Session files containing `upload_progress_` data | |
 | 7 | PHP processes running a binary that has been deleted or replaced (upgraded but not restarted) | m16a4666/php2shell-fix |
@@ -130,7 +131,7 @@ aws ssm get-command-invocation --command-id "$CID" --instance-id "$NODE" \
   --query '[Status,StandardOutputContent,StandardErrorContent]' --output text
 ```
 
-The heaviest step is reading `/var/log/pods` and the kernel journal; expect a short CPU and disk spike on small nodes.
+The heaviest step is reading `/var/log/pods`, host web server logs and the kernel journal; expect a short CPU and disk spike on small nodes.
 
 ## Mitigations (from the php.net announcement)
 

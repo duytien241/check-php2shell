@@ -186,20 +186,24 @@ mitigation_line() {
 	up=$(printf '%s\n' "$p" | sed -n 's/^ini\.session\.upload_progress\.enabled=//p' | head -1)
 	v=$(printf '%s\n' "$p" | sed -nE 's/^pool\.php_admin_(value|flag)\[session\.upload_progress\.enabled\]=//p' | tail -1)
 	[ -z "$v" ] || up="$v (pool)"
+	# Unreadable is not the same as disabled (the PHP default is On).
 	case "$up" in
-		0*|[Oo]ff*|'') parts+=("upload_progress=${up:-?} [OK]") ;;
-		*)              parts+=("upload_progress=$up [MISSING]") ;;
+		'')         parts+=("upload_progress=? [UNKNOWN]") ;;
+		0*|[Oo]ff*) parts+=("upload_progress=$up [OK]") ;;
+		*)          parts+=("upload_progress=$up [MISSING]") ;;
 	esac
 
 	mem=$(printf '%s\n' "$p" | sed -n 's/^ini\.memory_limit=//p' | head -1); mem_src="php.ini"
 	v=$(printf '%s\n' "$p" | sed -nE 's/^pool\.php_admin_value\[memory_limit\]=//p' | tail -1)
 	[ -z "$v" ] || { mem="$v"; mem_src="php_admin_value"; }
-	if [ "$mem" = "-1" ] && [ "$mem_src" = "php_admin_value" ]; then
+	if [ -z "$mem" ]; then
+		parts+=("memory_limit=? [UNKNOWN]")
+	elif [ "$mem" = "-1" ] && [ "$mem_src" = "php_admin_value" ]; then
 		parts+=("memory_limit=-1 ($mem_src) [OK]")
 	elif [ "$mem" = "-1" ]; then
 		parts+=("memory_limit=-1 ($mem_src, applications can still override it) [WEAK]")
 	else
-		parts+=("memory_limit=${mem:-?} ($mem_src) [MISSING]")
+		parts+=("memory_limit=$mem ($mem_src) [MISSING]")
 	fi
 
 	post=$(printf '%s\n' "$p" | sed -n 's/^ini\.post_max_size=//p' | head -1)
@@ -287,7 +291,8 @@ proc_tree_scan() {
 # Best-effort, read-only indicator-of-compromise sweep on the current host.
 # This is evidence collection, not an exploit test, and it proves neither compromise
 # nor a clean state. Run it on the node. It does not exec into containers:
-# container files are read through the overlay upperdir, container logs via /var/log/pods.
+# container files are read through the overlay upperdir, container logs via /var/log/pods,
+# and host web server / PHP-FPM logs from their usual paths under /var/log.
 audit_scan() {
 	local hours="${1:-48}" minutes since roots uppers out review=0 p e
 	case "$hours" in
@@ -345,10 +350,13 @@ audit_scan() {
 		} | head -200 || true)
 	report 3 'Webshell-like code in recently changed PHP files; auto_prepend_file/auto_append_file in ini files' "$out"
 
-	# Container logs (php-fpm writes to stdout) and the kernel log. Patterns from the
-	# WoYinDao Sigma rules, php2shell-detect, and how FPM reports a dead worker.
+	# Container logs (php-fpm writes to stdout), host nginx/apache/PHP-FPM logs (PHP outside
+	# Kubernetes) and the kernel log. Patterns from the WoYinDao Sigma rules, php2shell-detect,
+	# and how FPM reports a dead worker. Custom log paths outside /var/log are not covered.
 	out=$( {
-		find /var/log/pods -type f -name '*.log' -mmin "-${minutes}" -print0 2>/dev/null \
+		find /var/log/pods /var/log/nginx /var/log/apache2 /var/log/httpd /var/log/php* \
+			-type f \( -name '*.log' -o -name '*.log.[0-9]*' -o -name '*_log' -o -name '*_log-*' \) -not -name '*.gz' \
+			-mmin "-${minutes}" -print0 2>/dev/null \
 			| xargs -0 -r grep -HiE 'Allowed memory size of [0-9]+ bytes exhausted.*Unknown on line 0|exited on signal (6|7|11)|SIGSEGV|SIGBUS|Input variables exceeded|session id is too long or contains illegal characters|PHP_SESSION_UPLOAD_PROGRESS|upstream prematurely closed connection' 2>/dev/null \
 			| tail -150
 		if command -v journalctl >/dev/null 2>&1; then
@@ -357,7 +365,7 @@ audit_scan() {
 			dmesg 2>/dev/null | grep -iE 'php.*(segfault|general protection|trap)' | tail -50
 		fi
 		} || true)
-	report 4 'Logs: out of memory while parsing the request ("Unknown on line 0"), crashed FPM workers, unusual session/input warnings' "$out"
+	report 4 'Pod, web server, PHP-FPM and kernel logs: out of memory while parsing the request ("Unknown on line 0"), crashed FPM workers, unusual session/input warnings' "$out"
 
 	out=$(find /etc/cron* /var/spool/cron $(for p in $uppers; do printf '%s/etc/cron.d %s/var/spool/cron ' "$p" "$p"; done) \
 		-type f -cmin "-${minutes}" -ls 2>/dev/null | head -100 || true)
