@@ -16,7 +16,7 @@ Two memory-safety bugs in PHP core, fixed on 2026-10-21. Both are reachable by a
 | Branch | Fixed in | This script reports |
 |---|---|---|
 | 8.5 / 8.4 / 8.3 / 8.2 | 8.5.12 / 8.4.27 / 8.3.36 / 8.2.35 | `PATCHED` at or above, `VULNERABLE` below |
-| 7.4 / 8.0 / 8.1 | no release; [source backports](https://github.com/php/php-src/tree/PHP-8.1-CVE-2026-109618-109619) only | `VULNERABLE` (unless a vendor backport is detected) |
+| 7.4 / 8.0 / 8.1 | no release; source backports only ([7.4](https://github.com/php/php-src/tree/PHP-7.4-CVE-2026-109618-109619), [8.0](https://github.com/php/php-src/tree/PHP-8.0-CVE-2026-109618-109619), [8.1](https://github.com/php/php-src/tree/PHP-8.1-CVE-2026-109618-109619)) | `VULNERABLE` (unless a vendor backport is detected) |
 | 5.4 – 7.3 | end-of-life, no fix | `VULNERABLE` |
 | `-dev`, `alpha`, `beta`, `RC` builds of a fixed number | not a release | `VULNERABLE` |
 
@@ -42,7 +42,7 @@ Exit codes:
 
 | Mode | `0` | `1` | `2` |
 |---|---|---|---|
-| `crictl` | every container with PHP is `PATCHED` | at least one is `VULNERABLE` or `UNKNOWN` | — |
+| `crictl` | every container with PHP is `PATCHED` | at least one is `VULNERABLE` or `UNKNOWN`, or `crictl` is missing / `crictl ps` failed | — |
 | `audit` | every check is `PASS` | at least one `REVIEW` | invalid `HOURS` |
 | `url` | version found (read the status) | version not disclosed | missing URL |
 | `classify` | always (read the status) | — | — |
@@ -99,8 +99,8 @@ Seven read-only checks on the host. Container files are read through the overlay
 |---|---|---|
 | 1 | A shell, downloader or compiler whose parent or grandparent is php-fpm / php-cgi / apache / httpd / nginx | WoYinDao Sigma process rule |
 | 2 | PHP, `.user.ini`, `.htaccess` and PHP ini files changed in the window (ctime, which `touch` cannot fake). Laravel's `storage/framework` and `bootstrap/cache` are skipped | |
-| 3 | Webshell-like calls in those PHP files; `auto_prepend_file` / `auto_append_file` with a value in any ini or `.htaccess` | imsarah hardening guide |
-| 4 | Pod and kernel logs: `Allowed memory size … in Unknown on line 0`, `exited on signal 11`, segfaults, `Input variables exceeded`, illegal session id warnings, `upstream prematurely closed connection` | WoYinDao Sigma, php2shell-detect |
+| 3 | Webshell-like calls in those PHP files; `auto_prepend_file` / `auto_append_file` set to a value in any `.ini`, `.user.ini`, `.conf` or `.htaccess` (any age, not only the window) | imsarah hardening guide |
+| 4 | Pod logs changed in the window and the kernel log: `Allowed memory size … in Unknown on line 0`, `exited on signal 6/7/11`, `SIGSEGV`/`SIGBUS`, PHP segfaults, `Input variables exceeded`, illegal session id warnings, `PHP_SESSION_UPLOAD_PROGRESS`, `upstream prematurely closed connection` | WoYinDao Sigma, php2shell-detect |
 | 5 | Cron files changed in the window | |
 | 6 | Session files containing `upload_progress_` data | |
 | 7 | PHP processes running a binary that has been deleted or replaced (upgraded but not restarted) | m16a4666/php2shell-fix |
@@ -151,6 +151,8 @@ Only an update is a complete fix. These reduce exposure:
 ## Testing
 
 Tested locally with Docker: `php:7.3-fpm`, `php:8.3-fpm` with a mitigation ini, Ubuntu 24.04 with apt `php8.3-fpm` and a hardened pool, and a non-PHP container for `crictl`; Amazon Linux 2023 (gawk, GNU find) with planted indicators for every audit check, plus a clean run to confirm no false positives.
+
+`crictl` mode was exercised through `CRI=docker`. On a real node it reads pod name and namespace with `crictl inspect -o go-template`; if your `crictl` does not support that, it falls back to the image name only. Run it on one node first and check the output before rolling it out.
 
 ## Not included on purpose
 
