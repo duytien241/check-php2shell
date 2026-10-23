@@ -221,3 +221,34 @@ No proof-of-concept or active scanner. Active scanners for these CVEs send tens 
 - [fufufuwa/php2shell-detect](https://github.com/fufufuwa/php2shell-detect)
 - [imsarah/php2shell-hardening-for-agents](https://github.com/imsarah/php2shell-hardening-for-agents)
 - [crowdsecurity/hub vpatch-CVE-2026-109618](https://github.com/crowdsecurity/hub)
+
+## Node.js October 2026 release: `check-nodejs-server.sh`
+
+A separate read-only script for the Node.js security release of 2026-10-21 (CVE-2026-111497 Brotli decoder out-of-bounds write / RCE, TLS hostname bypasses, and 7 more), plus the eMudhra CA distrust. Output is in Vietnamese.
+
+| Branch | Fixed in |
+|---|---|
+| 22 / 24 / 26 | 22.23.4 / 24.22.1 / 26.12.1 |
+| 20 and older, 21, 23, 25 | end-of-life, no fix: move to 24 |
+
+What it checks:
+
+- every Node install on the host (PATH, distro package, nvm, fnm, volta, asdf, n, nodenv, snap, VS Code/Cursor Server, `--search DIR`), reading the version from `node_version.h` or package metadata before falling back to `node --version` as the file's owner;
+- every **running** node process: the real version of its binary, whether it runs in a container (and which one), its role (Next.js SSR, NestJS, pm2...), listening ports, and processes still on a replaced binary (restart needed);
+- distro backports (Debian/RPM changelog), and eMudhra/emSign certificates in `NODE_EXTRA_CA_CERTS`;
+- with `--containers`: `node --version` inside each running container that was not already seen (Docker or `crictl`).
+
+Container processes are read through `/proc/PID/root`; the script never runs a container's binary as root on the host, only via `docker exec` / `crictl exec`.
+
+```bash
+sudo ./check-nodejs-server.sh                 # installs + running processes + CA
+sudo ./check-nodejs-server.sh --containers    # also every running container
+sudo ./check-nodejs-server.sh --json > "$(hostname).json"
+./check-nodejs-server.sh --classify v20.11.1
+# run on a remote host without copying the file:
+ssh user@host 'sudo bash -s' < check-nodejs-server.sh
+```
+
+Exit codes: `0` OK · `1` a running process/container uses an unpatched or end-of-life Node, or needs a restart · `2` needs review (unknown version, eMudhra CA, or an unpatched install that nothing is running / editor-server bundle) · `3` no Node found · `64` bad arguments.
+
+Needs Bash 4+ (Linux). Partly based on [node-hostcheck](https://github.com/Charlie-Netdevops/node-hostcheck) v0.1.0 (MIT, commit 604f164).
